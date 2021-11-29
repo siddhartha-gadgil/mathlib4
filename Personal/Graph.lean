@@ -1,22 +1,12 @@
 import Mathlib.All
 
-
-#eval 1+1
-
 open Lean Elab Tactic Meta Std
 open Elab.Tactic
-#print prefix Lean.Environment
-#print Lean.Environment
-def fooT : MetaM Unit := do
-let e ← getEnv
-let numberOfDecls := e.constants.fold (λ n nm info => if True then n+1 else n) 0
--- IO.println e.allImportedModuleNames
-IO.println numberOfDecls
 
 namespace SMap
 
 variable {α β γ : Type _} [BEq α] [Hashable α]
--- If I go via `List (α × β) Lean crashes with an error (stack overflow?)
+-- If I go via `List (α × β)` Lean crashes with an error (stack overflow?)
 def mapToRBMap (m : SMap α β) {cmp : α → α → Ordering} (f : β → γ) : RBMap α γ cmp :=
   m.fold (init := ∅) fun es a b => es.insert a (f b)
 
@@ -50,9 +40,43 @@ t.fold (λ t' x y => t'.insert x (f y)) ∅
 
 end Std.RBMap
 
+namespace Std
+/-- a variant of RBMaps that stores a list of elements for each key.
+   `find` returns the list of elements in the opposite order that they were inserted. -/
+def RBLMap (α β : Type _) (cmp : α → α → Ordering) : Type _ := RBMap α (List β) cmp
+
+@[inline] def mkRBLMap (α : Type) (β : Type) (cmp : α → α → Ordering) : RBLMap α β cmp :=
+mkRBMap α (List β) cmp
+
+namespace RBLMap
+
+variable {α β : Type _} {cmp : α → α → Ordering}
+
+def insert (t : RBLMap α β cmp) (x : α) (y : β) : RBLMap α β cmp :=
+match t.find? x with
+| none   => RBMap.insert t x [y]
+| some l => RBMap.insert (t.erase x) x (y :: l)
+
+def erase (t : RBLMap α β cmp) (k : α) : RBLMap α β cmp :=
+RBMap.erase t k
+
+def contains (t : RBLMap α β cmp) (k : α) : Bool :=
+RBMap.contains t k
+
+def find (t : RBLMap α β cmp) (k : α) : List β :=
+(RBMap.find? t k).getD []
+
+end RBLMap
+
+def NameLMap (β : Type _) := RBLMap Name β Name.quickCmp
+
+instance (β : Type _) : EmptyCollection (NameLMap β) := ⟨mkNameMap _⟩
+
+end Std
+
 namespace Lean.Expr
 
-/-- The names occurring in an expression.-/
+/-- The names occurring in an expression. -/
 def listNames (e : Expr) : NameSet :=
 e.foldConsts ∅ λ nm nms => nms.insert nm
 
@@ -68,6 +92,9 @@ def positions {α : Type _} (a : Array α) (cmp : α → α → Ordering) : RBMa
 
 def sum (a : Array Float) : Float :=
 a.foldr (·+·) 0
+
+def take {α : Type _} [Inhabited α] (a : Array α) (n : ℕ) : Array α :=
+if a.size ≤ n then a else (range n).map (a.get! ·)
 
 end Array
 
@@ -112,64 +139,116 @@ def interestingDecls : CoreM (Array Name) := do
   let env ← getEnv
   (← getAllDecls).filter λ nm => isInteresting nm $ env.find! nm
 
--- /-- There is an edge from `v₁` to `v₂` if `v₁` references `v₂`. -/
--- def references (v₁ v₂ : Name × ConstantInfo) : Bool :=
--- v₁.2.anyRefs.contains v₂.1
+def interestingDeclTree : CoreM (NameLMap Name) := do
+let e ← getEnv
+let interestingDeclsList := (SMap.mapToRBMap e.constants id).filter isInteresting
+interestingDeclsList.mapValue λ info => info.anyRefs.toList
 
---(some [Lean.ConstantInfo, Prod.snd, Prod.fst, Prod, Bool, Lean.NameSet.contains, Lean.Name, Lean.ConstantInfo.anyRefs])
+def transpose (t : NameLMap Name) : NameLMap Name :=
+t.fold (λ tnew nm_src l => l.foldl (λ tnew nm_tgt => tnew.insert nm_tgt nm_src) tnew) ∅
 
-def dampingFactor : Float := 0.85
-
+/-- Edges point from a declaration `d` to all declarations occurring in `d`. -/
 structure NameNode where
-  -- info : ConstantInfo
   name : Name
   outEdges : Array ℕ
   inEdges : Array ℕ
   weight : Float
 deriving Inhabited
 
-structure NameGraph where
-  size  : ℕ
-  nodes : Array NameNode
+
+instance : ToString NameNode :=
+⟨λ nn => "⟨" ++ toString nn.name ++ ", using " ++ toString nn.outEdges.size ++ ", used by" ++ toString nn.inEdges.size ++
+  ", " ++ toString nn.weight ++ "⟩"⟩
+
+/- TODO: currently we ignore all non-interesting declarations occurring in interesting declarations.
+For _proof_i and _eqn_i declarations, it would be better to point at the corresponding interesting decl -/
+/- Todo: we currently "lose" the weight of all declarations that do not refer to anything.
+Probably best to uniformly distribute those weights back to all decls. -/
+
+-- structure NameGraph where
+--   size  : ℕ
+--   nodes : Array NameNode
   -- nodes   : NameMap ConstantInfo
   -- edges   : NameMap NameSet
   -- weights : NameMap Float
+def NameGraph := Array NameNode
 deriving Inhabited
-#check Array.qsort
+
 def mkNameGraph : CoreM NameGraph := do
   let l ← interestingDecls
-  let n := l.size
   let env ← getEnv
   let pos : NameMap ℕ := l.positions _
-  let a : Array (Name × Array ℕ) := l.map λ nm => (nm, (env.find! nm).anyRefs.toArray.filterMap pos.find?)
-  -- transpose outEdges
-  let inEdges := Array (Array ℕ) := _
-  return ⟨n, a.map λ ⟨nm, outEdges⟩ => ⟨nm, outEdges, _, (1 : Float) / Float.ofNat n⟩⟩
---l.map λ nm => ⟨nm, (env.find! nm).anyRefs.toArray.filterMap pos.find? , (1 : Float) / Float.ofNat n⟩
+  let inEdges ← transpose <$> interestingDeclTree
+  return l.map λ nm => ⟨nm, (env.find! nm).anyRefs.toArray.filterMap pos.find?,
+    (inEdges.find nm).toArray.filterMap pos.find?, (1 : Float) / Float.ofNat l.size⟩
 
-def edgeNames (g : NameGraph) (nn : NameNode) : Array Name :=
-nn.edges.map λ n => g.nodes[n].name
+def inEdgeNames (g : NameGraph) (nn : NameNode) : Array Name :=
+nn.inEdges.map λ n => g[n].name
 
+def outEdgeNames (g : NameGraph) (nn : NameNode) : Array Name :=
+nn.outEdges.map λ n => g[n].name
 
--- as a trial: we let weight flow the wrong way
-def step (g : NameGraph) : NameGraph :=
-⟨g.size, g.nodes.map λ nn => ⟨nn.name, nn.edges,
+/--
+Every step, `w(A)`, the weight of node `A` is changed to
+`(1 - d) / N + d ∑_B w(B) / L(B)`
+where:
+* `d` is the damping factor
+* `N` is the size of the graph
+* we sum over all nodes `B` that has a edge to `A`
+* `L(B)` is the number of outgoing edges out of `B`.
+-/
+def step (g : NameGraph) (dampingFactor : Float := 0.85) : NameGraph :=
+g.map λ nn => { nn with weight :=
   (1 - dampingFactor) / Float.ofNat g.size +
-  dampingFactor * (nn.edges.map $ λ n => (g.nodes[n]).weight / Float.ofNat nn.edges.size).sum⟩⟩ -- todo: fix, using wrong length
+  dampingFactor * (nn.inEdges.map $ λ n => g[n].weight / Float.ofNat g[n].outEdges.size).sum }
+
+def sortByName (g : NameGraph) : NameGraph :=
+g.qsort λ nn1 nn2 => nn1.name.quickCmp nn2.name == Ordering.lt
+
+def sortRevByWeight (g : NameGraph) : NameGraph :=
+g.qsort λ nn1 nn2 => nn1.weight > nn2.weight
+
+/-
+graph currently has 27035 nodes
+
+after 1 step, top weights:
+#[Nat, Eq, Lean.Name, Bool, Array, Lean.Expr, OfNat.ofNat, String, Option, instOfNatNat]
+Nat's weight is 0.029
+
+-/
 
 -- #exit
+-- #eval (do
+--   let env ← getEnv
+--   let g ← mkNameGraph
+--   IO.println g.size
+--   return ()
+--   : CoreM Unit)
+#exit
 #eval (do
   let env ← getEnv
   let g ← mkNameGraph
-  let nr := 12341
-  IO.println $ (g.nodes[nr].weight * (Float.ofNat g.size))
-  IO.println $ (g.nodes[nr].name)
-  IO.println $ (env.find! g.nodes[nr].name).anyRefs.toList
-  IO.println $ (edgeNames g g.nodes[nr])
+  IO.println $ (g.take 10).map (·.name)
+  IO.println $ g.take 10
   let g := step g
-  IO.println $ (g.nodes[nr].weight * (Float.ofNat g.size))
+  let g := sortRevByWeight g
+  IO.println $ (g.take 10).map (·.name)
+  IO.println $ g.take 10
+  -- let g := step g
+  -- let nr := 22313
+  -- IO.println $ g[nr]
+  -- -- IO.println $ (g[nr].weight * (Float.ofNat g.size))
+  -- -- IO.println $ (g[nr].name)
+  -- -- IO.println $ (env.find! g[nr].name).anyRefs.toList
+  -- -- IO.println $ (outEdgeNames g g[nr])
+  -- -- IO.println $ (inEdgeNames g g[nr])
+  -- let nr := 20827
+  -- IO.println $ (g[nr])
+  -- let nr := 12341
+  -- IO.println $ (g[nr])
+  -- IO.println $ (g[nr].weight * (Float.ofNat g.size))
   return ()
-  : MetaM Unit)
+  : CoreM Unit)
 
 
 #check Array.qsort

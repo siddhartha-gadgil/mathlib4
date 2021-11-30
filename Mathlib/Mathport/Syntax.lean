@@ -155,12 +155,7 @@ syntax (name := rw) "rw " rwRuleSeq : conv
 
 end Conv
 
-syntax (name := rcases?) "rcases?" casesTarget,* (" : " num)? : tactic
-syntax (name := rcases) "rcases" casesTarget,* (" with " rcasesPat)? : tactic
 syntax (name := obtain) "obtain" (ppSpace rcasesPatMed)? (" : " term)? (" := " term,+)? : tactic
-
-syntax (name := rintro?) "rintro?" (" : " num)? : tactic
-syntax (name := rintro) "rintro" (ppSpace rintroPat)* (" : " term)? : tactic
 
 syntax (name := ext1) "ext1" (ppSpace rcasesPat)* : tactic
 syntax (name := ext1?) "ext1?" (ppSpace rcasesPat)* : tactic

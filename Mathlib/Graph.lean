@@ -1293,3 +1293,4 @@ def main (strs : List String) : IO UInt32 := do
 
 
 -- #check Array.qsort
+#print UInt64.ofNatCore

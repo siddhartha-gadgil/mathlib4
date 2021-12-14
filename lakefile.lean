@@ -27,6 +27,7 @@ def cLibTarget (pkgDir : FilePath) : FileTarget :=
 
 package mathlib (pkgDir) (args) {
   -- customize layout
+  binRoot := `Personal.Graph
   srcDir := "Mathlib"
   libRoots := #[`mathlib]
   -- specify the lib as an additional target

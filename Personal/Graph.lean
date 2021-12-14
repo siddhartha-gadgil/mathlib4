@@ -1,4 +1,4 @@
-import Mathlib.All
+import Mathlib
 
 open Lean Elab Tactic Meta Std
 open Elab.Tactic
@@ -84,9 +84,6 @@ end Lean.Expr
 
 namespace Array
 
-def range (n : Nat) : Array ℕ :=
-(List.range n).toArray
-
 def positions {α : Type _} (a : Array α) (cmp : α → α → Ordering) : RBMap α ℕ cmp :=
 (a.zip $ range a.size).foldl (λ t (x, n) => t.insert x n) ∅
 
@@ -155,25 +152,33 @@ structure NameNode where
   weight : Float
 deriving Inhabited
 
-
 instance : ToString NameNode :=
-⟨λ nn => "⟨" ++ toString nn.name ++ ", using " ++ toString nn.outEdges.size ++ ", used by" ++ toString nn.inEdges.size ++
+⟨λ nn => "⟨" ++ toString nn.name ++ ", using " ++ toString nn.outEdges.size ++ ", used by " ++ toString nn.inEdges.size ++
   ", " ++ toString nn.weight ++ "⟩"⟩
+
+protected def List.toStringSepAux {α : Type u} [ToString α] (sep : String := ", ") :
+  Bool → List α → String
+  | b,     []    => ""
+  | true,  x::xs => toString x ++ List.toStringSepAux sep false xs
+  | false, x::xs => sep ++ toString x ++ List.toStringSepAux sep false xs
+
+protected def List.toStringSep {α : Type u} [ToString α] (sep : String := ", ") : List α → String
+  | []    => "[]"
+  | x::xs => "[" ++ List.toStringSepAux sep true (x::xs) ++ "]"
+
+instance [ToString α] : ToString (Array α) where
+  toString a := "!#" ++ a.toList.toStringSep ",\n"
 
 /- TODO: currently we ignore all non-interesting declarations occurring in interesting declarations.
 For _proof_i and _eqn_i declarations, it would be better to point at the corresponding interesting decl -/
 /- Todo: we currently "lose" the weight of all declarations that do not refer to anything.
 Probably best to uniformly distribute those weights back to all decls. -/
 
--- structure NameGraph where
---   size  : ℕ
---   nodes : Array NameNode
-  -- nodes   : NameMap ConstantInfo
-  -- edges   : NameMap NameSet
-  -- weights : NameMap Float
 def NameGraph := Array NameNode
 deriving Inhabited
 
+
+#print Array.get?
 def mkNameGraph : CoreM NameGraph := do
   let l ← interestingDecls
   let env ← getEnv
@@ -188,6 +193,14 @@ nn.inEdges.map λ n => g[n].name
 def outEdgeNames (g : NameGraph) (nn : NameNode) : Array Name :=
 nn.outEdges.map λ n => g[n].name
 
+-- def nodesWithNoOutEdges (g : NameGraph) : List ℕ :=
+
+def weightWithNoOutEdges (g : NameGraph) : Float :=
+g.foldr (λ nn s => if nn.outEdges.isEmpty then s + nn.weight else s) 0
+
+def totalWeight (g : NameGraph) : Float :=
+g.foldr (λ nn s => s + nn.weight) 0
+
 /--
 Every step, `w(A)`, the weight of node `A` is changed to
 `(1 - d) / N + d ∑_B w(B) / L(B)`
@@ -198,8 +211,9 @@ where:
 * `L(B)` is the number of outgoing edges out of `B`.
 -/
 def step (g : NameGraph) (dampingFactor : Float := 0.85) : NameGraph :=
+let w := weightWithNoOutEdges g
 g.map λ nn => { nn with weight :=
-  (1 - dampingFactor) / Float.ofNat g.size +
+  (1 - dampingFactor + w * dampingFactor) / Float.ofNat g.size +
   dampingFactor * (nn.inEdges.map $ λ n => g[n].weight / Float.ofNat g[n].outEdges.size).sum }
 
 def sortByName (g : NameGraph) : NameGraph :=
@@ -217,23 +231,26 @@ Nat's weight is 0.029
 
 -/
 
--- #exit
--- #eval (do
---   let env ← getEnv
---   let g ← mkNameGraph
---   IO.println g.size
---   return ()
---   : CoreM Unit)
-#exit
-#eval (do
+def test (printNum : ℕ := 10) (iter : ℕ := 5) (sort? : Bool := true) : CoreM Unit := do
   let env ← getEnv
   let g ← mkNameGraph
-  IO.println $ (g.take 10).map (·.name)
-  IO.println $ g.take 10
-  let g := step g
-  let g := sortRevByWeight g
-  IO.println $ (g.take 10).map (·.name)
-  IO.println $ g.take 10
+  IO.println $ toString printNum ++ " entries from the graph:"
+  -- IO.println $ (g.take printNum).map (·.name)
+  IO.println $ g.take printNum
+  -- IO.println $ "Total weight: " ++ toString (totalWeight g)
+  -- IO.println $ "weight (no out edges): " ++ toString (weightWithNoOutEdges g)
+  if iter > 0 then
+    let g := iter.iterate step g
+    IO.println $ "\nAfter iterating " ++ toString iter ++ " times, the same entries:"
+    IO.println $ g.take printNum
+    -- IO.println $ "Total weight: " ++ toString (totalWeight g)
+    -- IO.println $ "weight (no out edges): " ++ toString (weightWithNoOutEdges g)
+    if sort? then
+      let g := sortRevByWeight g
+      -- IO.println $ (g.take printNum).map (·.name)
+      IO.println $ "\nAfter iterating " ++ toString iter ++ " times, the " ++ toString printNum ++
+        " entries with the highest weight:"
+      IO.println $ g.take printNum
   -- let g := step g
   -- let nr := 22313
   -- IO.println $ g[nr]
@@ -248,7 +265,78 @@ Nat's weight is 0.029
   -- IO.println $ (g[nr])
   -- IO.println $ (g[nr].weight * (Float.ofNat g.size))
   return ()
-  : CoreM Unit)
+
+-- #exit
+#eval test 10 0 false
+#eval 1
+
+/-
+10 entries from the graph:
+!#[⟨NameNode.name, using 2, used by 5, 0.000036⟩,
+⟨getAllDecls, using 32, used by 1, 0.000036⟩,
+⟨Array.positions, using 15, used by 1, 0.000036⟩,
+⟨NameNode.mk, using 5, used by 9, 0.000036⟩,
+⟨Std.RBLMap.contains, using 5, used by 0, 0.000036⟩,
+⟨List.toStringSep, using 12, used by 1, 0.000036⟩,
+⟨Std.RBMap.union, using 4, used by 1, 0.000036⟩,
+⟨Array.take, using 11, used by 1, 0.000036⟩,
+⟨List.toStringSep.match_1, using 6, used by 1, 0.000036⟩,
+⟨Std.RBLMap, using 3, used by 6, 0.000036⟩]
+Total weight: 1.000000
+weight (no out edges): 0.031094
+
+After iterating 4 times, the same entries:
+!#[⟨NameNode.name, using 2, used by 5, 0.000020⟩,
+⟨getAllDecls, using 32, used by 1, 0.000016⟩,
+⟨Array.positions, using 15, used by 1, 0.000016⟩,
+⟨NameNode.mk, using 5, used by 9, 0.000027⟩,
+⟨Std.RBLMap.contains, using 5, used by 0, 0.000015⟩,
+⟨List.toStringSep, using 12, used by 1, 0.000017⟩,
+⟨Std.RBMap.union, using 4, used by 1, 0.000017⟩,
+⟨Array.take, using 11, used by 1, 0.000015⟩,
+⟨List.toStringSep.match_1, using 6, used by 1, 0.000016⟩,
+⟨Std.RBLMap, using 3, used by 6, 0.000034⟩]
+Total weight: 1.000000
+weight (no out edges): 0.321060
+
+After iterating 1 times, the 10 entries with the highest weight:
+!#[⟨Nat, using 0, used by 8551, 0.028320⟩,
+⟨Eq, using 0, used by 7667, 0.024517⟩,
+⟨Lean.Name, using 0, used by 4578, 0.016242⟩,
+⟨Bool, using 0, used by 3872, 0.014440⟩,
+⟨Array, using 0, used by 3574, 0.013043⟩,
+⟨Lean.Expr, using 0, used by 3342, 0.012934⟩,
+⟨OfNat.ofNat, using 2, used by 4914, 0.011044⟩,
+⟨Option, using 0, used by 3060, 0.010674⟩,
+⟨String, using 0, used by 2861, 0.010555⟩,
+⟨instOfNatNat, using 3, used by 4630, 0.010337⟩]
+
+After iterating 4 times, the 10 entries with the highest weight:
+!#[⟨Nat, using 0, used by 8551, 0.029767⟩,
+⟨Eq, using 0, used by 7667, 0.021859⟩,
+⟨Lean.Name, using 0, used by 4578, 0.014497⟩,
+⟨Bool, using 0, used by 3872, 0.011800⟩,
+⟨Option, using 0, used by 3060, 0.010135⟩,
+⟨PUnit, using 0, used by 1234, 0.009875⟩,
+⟨Unit, using 1, used by 3414, 0.009633⟩,
+⟨List, using 0, used by 2913, 0.008598⟩,
+⟨String, using 0, used by 2861, 0.008158⟩,
+⟨Array, using 0, used by 3574, 0.007218⟩]
+-/
+-- #print unsafeIO
+-- def main (strs : List String) : IO UInt32 := do
+--   let env ← getEnv
+--   let u ← Core.CoreM.unsafeRun test {} {}
+--   return 0
+
+-- #exit
+-- #eval (do
+--   let env ← getEnv
+--   let g ← mkNameGraph
+--   IO.println g.size
+--   return ()
+--   : CoreM Unit)
+-- #exit
 
 
-#check Array.qsort
+-- #check Array.qsort

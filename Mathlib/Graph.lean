@@ -267,8 +267,12 @@ To compile:
 * Run `elan self update`
 * Clone/Download the `leanprover-community/mathlib4` repository
 * Checkout the branch `fpvandoorn/graph`
-* Run `lake build`
-To run, you can run something like :
+* Run `lake build` in the `mathlib4` folder
+If you want to run this on Mathbin, you also have to get that:
+* Clone/Download `leanprover-community/mathlib3port` in the same directory
+  (i.e. the folders `mathlib4` and `mathlib3port` must live in the same directory)
+* Run `lake build` in the `mathlib3port` folder
+To run, you can run something like (in the `mathlib4` folder):
 `time ./build/bin/mathlib 0 100 1 1 structure Mathbin > out.txt`
 All arguments are optional, but you have to provide the arguments in order:
 * The first argument is the number of entries printed (default = 0, which means print everything)

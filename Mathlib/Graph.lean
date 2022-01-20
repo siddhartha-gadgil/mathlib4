@@ -261,6 +261,17 @@ def printData (printNum : ℕ := 0) (iter : ℕ := 5) (sort? : Bool := true) (tr
     IO.println $ if printNum > 0 then g.take printNum else g
   return ()
 
+/-- Import mathbin if `b`, otherwise import mathlib. -/
+def importMathbinOrMathlib (b : Bool) : IO Environment := do
+if b then
+  initSearchPath (← Lean.findSysroot?) ["../mathlib3port/build/lib",
+  "../mathlib3port/lean_packages/lean3port/build/lib/",
+  "../mathlib3port/lean_packages/mathlib/build/lib/"]
+  importModules [{module := `Mathbin}] {}
+else
+  initSearchPath (← Lean.findSysroot?) ["build/lib"]
+  importModules [{module := `Mathlib}] {}
+
 /--
 To compile:
 * Make sure you have `elan` (which you have if you have ever installed Lean)
@@ -284,19 +295,134 @@ All arguments are optional, but you have to provide the arguments in order:
 * The sixth argument determines which library to use ("Mathbin" (capitalized!) means use the
   libraries of Lean 3 + Lean 4, anything else means only use the Lean 4 library).
 -/
-def main (strs : List String) : IO UInt32 := do
-  let env ←
-    if strs.get? 5 == some "Mathbin" then
-      initSearchPath (← Lean.findSysroot?) ["../mathlib3port/build/lib",
-      "../mathlib3port/lean_packages/lean3port/build/lib/",
-      "../mathlib3port/lean_packages/mathlib/build/lib/"]
-      importModules [{module := `Mathbin}] {}
-    else
-      initSearchPath (← Lean.findSysroot?) ["build/lib"]
-      importModules [{module := `Mathlib}] {}
+def main' (strs : List String) : IO UInt32 := do
+  let env ← importMathbinOrMathlib (strs.get? 5 == some "Mathbin")
   let args := ((strs.take 4).map String.toNat!).toArray
-  let u ← CoreM.toIO
+  let _ ← CoreM.toIO
     (printData (args.getD 0 10) (args.getD 1 5) (args.getD 2 1 != 0) (args.getD 3 0 != 0)
       (strs.get? 4))
     {} {env := env}
+  return 0
+
+structure NodeData where
+  name : Name -- name of the declaration
+  kind : String -- def/theorem/inductive/...
+  info : String -- instance/class/none
+  typeKind : String -- proposition/type/proof/value
+  conclusionHead : Name -- the head of the conclusion. Can be used to get a rough idea what this declaration is (equality, group, equivalence, ...).
+  -- `[anonymous]` means it's a sort, local variable, or something similar.
+  module : Name -- file in which the declaration is located
+
+inductive EdgeLocation :=
+| argument | conclusion | body
+
+
+-- structure EdgeData where
+--   -- occursInArgument : Bool
+--   -- occursInConclusion : Bool
+--   occursInType : Bool
+--   occursInValue : Bool
+namespace Lean.Expr
+/-- Get the codomain/target of a pi-type.
+  This definition doesn't instantiate bound variables, and therefore produces a term that is open.
+  See note [open expressions]. -/
+def piCodomain : Expr → Expr
+| forallE n t b d => piCodomain b
+| e => e
+end Lean.Expr
+
+namespace Lean.ConstantInfo
+def kindAux : ConstantInfo → String
+  | defnInfo     _ => "def"
+  | axiomInfo    _ => "axiom"
+  | thmInfo      _ => "theorem"
+  | opaqueInfo   _ => "constant"
+  | quotInfo     _ => "built-in-quotient-constant"
+  | inductInfo   _ => "inductive"
+  | ctorInfo     _ => "constructor"
+  | recInfo      _ => "recursor"
+
+def kind (env : Environment) (info : ConstantInfo) : String :=
+if isStructure env info.name then "structure" else info.kindAux
+
+def extraInfo (env : Environment) (info : ConstantInfo) : String :=
+if isClass env info.name then "class"
+  else if (instanceExtension.getState env).instanceNames.contains info.name then "instance"
+  else "none"
+-- #check forallTelescope
+def typeKind (info : ConstantInfo) : MetaM String := do
+  -- let e ← mkConstWithFreshMVarLevels info.name
+  -- let issort ← forallTelescope info.type $ λ _ concl => concl.isSort
+  -- let isprop ← forallTelescope info.type $ λ _ e => e.isProp
+  let issort ← info.type.piCodomain.isSort
+  let isprop ← info.type.piCodomain.isProp
+  let isproof ← isProp info.type
+  -- pure $
+  if isprop then "proposition"
+    else if issort then "type"
+    else if isproof then "proof" else
+    "value"
+
+end Lean.ConstantInfo
+
+def getGraphData (nm : Name): MetaM NodeData := do
+  let info ← getConstInfo nm
+  let env ← getEnv
+  let typeKind ← info.typeKind
+  let conclusionHead ← info.type.piCodomain.getAppFn.constName
+  let moduleIdx := env.const2ModIdx.find? nm
+  let module := (moduleIdx.map λ n => env.header.moduleNames[n]).getD "notfound"
+  return ⟨nm, info.kind env, info.extraInfo env, typeKind, conclusionHead, module⟩
+
+def boolNr : Bool → String
+| false => "0"
+| true  => "1"
+
+instance : ToString NodeData :=
+⟨λ d => s!"{d.name} {d.kind} {d.info} {d.typeKind} {d.conclusionHead} {d.module}"⟩
+
+-- instance : ToString EdgeData :=
+-- ⟨λ d => s!"{boolNr d.occursInType} {boolNr d.occursInValue}"⟩
+
+-- #eval MetaM.run' do
+--   let d ← getGraphData `Prod.mk
+--   IO.println d
+
+/--
+This function prints a graph with all declarations.
+First it contains all declarations (1 per line) with space-separated fields (excluding some uninteresting declarations):
+* index
+* name of declaration
+* declaration kind (def/theorem/inductive/...)
+* additional declaration info (instance/class/none)
+* information about the type of the declaration (proposition/type/proof/value)
+* the head of the conclusion. Can be used to get a rough idea what this declaration is (equality, group, equivalence, ...). `[anonymous]` means it's a sort or a local variable.
+* the file where the declaration is declared
+Then there is an empty line followed with all edges (1 per line) with space-separated fields
+* (index of) source
+* (index of) target: the target is the declaration that occurs somewhere in the source
+* 1 if the target occurs in the type of the source, 0 otherwise
+* 1 if the target occurs in the value (body) of the source, 0 otherwise
+-/
+def printGraphData : MetaM Unit := do
+  let l ← interestingDecls
+  let pos : NameMap ℕ := l.positions _
+  l.toList.enum.forM λ (n, nm) => do
+    let data ← getGraphData nm
+    IO.println s!"{n} {data}"
+  IO.println ""
+  let env ← getEnv
+  l.toList.enum.forM λ (n, src) => do
+    let info ← env.find! src
+    let r1 ← info.typeRefs
+    let r2 ← info.valueRefs
+    let _ ← (r1.union r2).toList.forM λ (tgt, _) =>
+      if pos.contains tgt then
+        IO.println s!"{n} {pos.find! tgt} {boolNr $ r1.contains tgt} {boolNr $ r2.contains tgt}"
+      else return ()
+  return ()
+
+def main (strs : List String) : IO UInt32 := do
+  let env ← importMathbinOrMathlib (strs.get? 0 == some "Mathbin")
+  let _ ← CoreM.toIO (MetaM.run' printGraphData) {} {env := env}
   return 0

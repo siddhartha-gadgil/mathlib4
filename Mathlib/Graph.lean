@@ -389,11 +389,11 @@ instance : ToString NodeData :=
 --   IO.println d
 
 /--
-This function prints a graph with all declarations.
+This function prints a graph with (almost) all declarations.
 First it contains all declarations (1 per line) with space-separated fields (excluding some uninteresting declarations):
 * index
 * name of declaration
-* declaration kind (def/theorem/inductive/...)
+* declaration kind (def/theorem/structure/inductive/...)
 * additional declaration info (instance/class/none)
 * information about the type of the declaration (proposition/type/proof/value)
 * the head of the conclusion. Can be used to get a rough idea what this declaration is (equality, group, equivalence, ...). `[anonymous]` means it's a sort or a local variable.
@@ -403,6 +403,15 @@ Then there is an empty line followed with all edges (1 per line) with space-sepa
 * (index of) target: the target is the declaration that occurs somewhere in the source
 * 1 if the target occurs in the type of the source, 0 otherwise
 * 1 if the target occurs in the value (body) of the source, 0 otherwise
+
+For example, the output could contain
+```
+57474 Nat inductive none type [anonymous] Init.Prelude
+83962 Nat.succ constructor none value Nat Init.Prelude
+
+83962 57474 1 0
+```
+These are the nodes for `Nat`, `Nat.succ` and the edge that `Nat` occurs in the type of `Nat.succ`
 -/
 def printGraphData : MetaM Unit := do
   let l ← interestingDecls
